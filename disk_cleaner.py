@@ -94,12 +94,12 @@ def move_to_trash(path, trash_dir=None):
     os.makedirs(trash_dir, exist_ok=True)
     base = os.path.basename(path.rstrip(os.sep)) or "item"
     dest = os.path.join(trash_dir, base)
-    if os.path.exists(dest):
-        stem, ext = os.path.splitext(base)
-        n = 1
-        while os.path.exists(dest):
-            dest = os.path.join(trash_dir, "%s %d%s" % (stem, n, ext))
-            n += 1
+    n = 1
+    while os.path.exists(dest):
+        # suffix at the end so "com.apple.Safari" -> "com.apple.Safari 1"
+        # (splitext would wrongly treat ".Safari" as an extension)
+        dest = os.path.join(trash_dir, "%s %d" % (base, n))
+        n += 1
     try:
         os.rename(path, dest)
     except OSError as exc:
@@ -304,17 +304,33 @@ def build_inventory(
     }
 
 
+def _delete_reason(exc):
+    """Human-friendly failure reason for a failed move."""
+    if isinstance(exc, ProtectedPathError):
+        return "보호된 시스템 경로 (삭제 차단)"
+    err = getattr(exc, "errno", None)
+    if err in (errno.EPERM, errno.EACCES, errno.ENOENT):
+        return "macOS 보호 — 전체 디스크 접근 권한이 필요할 수 있음"
+    return str(exc)
+
+
 def iter_delete(paths, mover=None):
     """Yield a progress event per path as it is moved to Trash.
 
-    Each event: {i, total, path, ok, freed, and size or reason}. A failure on
-    one path (e.g. PermissionError) is reported and the batch continues.
+    Each event: {i, total, path, ok, freed, and size/reason/skipped}. A path
+    that vanished before deletion (macOS daemons churn caches constantly) is
+    reported as skipped, not a failure. A real failure (e.g. TCC-protected)
+    is reported and the batch continues.
     """
     if mover is None:
         mover = move_to_trash
     freed = 0
     total = len(paths)
     for i, p in enumerate(paths, 1):
+        if not os.path.lexists(p):
+            yield {"i": i, "total": total, "path": p, "ok": True,
+                   "skipped": True, "size": 0, "freed": freed}
+            continue
         size = dir_size(p)
         try:
             mover(p)
@@ -323,7 +339,7 @@ def iter_delete(paths, mover=None):
                    "size": size, "freed": freed}
         except Exception as exc:  # noqa: BLE001 - report, never abort batch
             yield {"i": i, "total": total, "path": p, "ok": False,
-                   "reason": str(exc), "freed": freed}
+                   "reason": _delete_reason(exc), "freed": freed}
 
 
 def delete_paths(paths, mover=None):
@@ -514,7 +530,7 @@ async function confirmDelete(){const sel=selected();
  catch(e){document.getElementById('prog-title').textContent='네트워크 오류';
   document.getElementById('prog-close').style.display='inline-block';return;}
  const reader=resp.body.getReader(),dec=new TextDecoder();
- let buf='',fails=0,freed=0,doneN=0;
+ let buf='',fails=0,skips=0,freed=0,doneN=0;
  while(true){
   const {value,done}=await reader.read();if(done)break;
   buf+=dec.decode(value,{stream:true});let nl;
@@ -522,12 +538,15 @@ async function confirmDelete(){const sel=selected();
    const line=buf.slice(0,nl);buf=buf.slice(nl+1);
    if(!line.trim())continue;
    const ev=JSON.parse(line);doneN=ev.i;freed=ev.freed;
-   setProg(ev.i,ev.total,ev.freed,(ev.ok?'✓ ':'✗ ')+ev.path);
-   if(!ev.ok){fails++;const d=document.createElement('div');
+   const mark=ev.skipped?'○ 이미 정리됨: ':(ev.ok?'✓ ':'✗ ');
+   setProg(ev.i,ev.total,ev.freed,mark+ev.path);
+   if(ev.skipped)skips++;
+   else if(!ev.ok){fails++;const d=document.createElement('div');
     d.textContent='실패: '+ev.path+' ('+ev.reason+')';
     document.getElementById('prog-fails').appendChild(d);}}}
  document.getElementById('prog-title').textContent=
-  '완료 — '+fmt(freed)+' 확보, 실패 '+fails+'건';
+  '완료 — '+fmt(freed)+' 확보, 실패 '+fails+'건'+
+  (skips?', 이미 정리됨 '+skips+'건':'');
  document.getElementById('prog-cur').textContent='';
  if(fails>0){const h=document.createElement('div');h.style.color='#86868b';
   h.textContent='💡 권한 거부 항목은 시스템 설정 → 개인정보 보호 및 보안 → '+

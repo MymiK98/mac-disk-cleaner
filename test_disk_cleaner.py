@@ -85,7 +85,8 @@ class MoveToTrashTest(unittest.TestCase):
         dest = disk_cleaner.move_to_trash(src, trash_dir=trash)
 
         self.assertTrue(os.path.exists(dest))
-        self.assertNotEqual(os.path.basename(dest), "dup.bin")
+        # suffix appended at the END, dotted names preserved
+        self.assertEqual(os.path.basename(dest), "dup.bin 1")
         # original pre-existing file untouched
         with open(os.path.join(trash, "dup.bin"), "rb") as f:
             self.assertEqual(f.read(), b"old")
@@ -323,13 +324,26 @@ class DeletePathsTest(unittest.TestCase):
         self.assertEqual(moved, [good])
 
     def test_failure_recorded_not_raised(self):
+        root = tempfile.mkdtemp()
+        target = os.path.join(root, "exists.bin")
+        with open(target, "wb") as f:
+            f.write(b"x" * 10)
+
         def boom(path):
             raise RuntimeError("denied")
 
-        result = disk_cleaner.delete_paths(["/tmp/whatever"], mover=boom)
+        result = disk_cleaner.delete_paths([target], mover=boom)
         self.assertEqual(result["freed"], 0)
         self.assertEqual(len(result["failed"]), 1)
-        self.assertEqual(result["failed"][0]["path"], "/tmp/whatever")
+        self.assertEqual(result["failed"][0]["path"], target)
+
+    def test_vanished_path_skipped_not_failed(self):
+        # a path that no longer exists (daemon churn) is skipped, not a failure
+        events = list(disk_cleaner.iter_delete(["/no/such/path/gone"]))
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0]["ok"])
+        self.assertTrue(events[0]["skipped"])
+        self.assertEqual(events[0]["freed"], 0)
 
     def test_iter_delete_continues_past_permission_failure(self):
         root = tempfile.mkdtemp()
