@@ -195,3 +195,22 @@ class DeletePathsTest(unittest.TestCase):
         self.assertEqual(result["freed"], 0)
         self.assertEqual(len(result["failed"]), 1)
         self.assertEqual(result["failed"][0]["path"], "/tmp/whatever")
+
+
+class RenderHtmlTest(unittest.TestCase):
+    def test_embeds_data_and_categories(self):
+        inv = {
+            "categories": [
+                {"key": "system_cache", "title": "시스템 캐시/로그",
+                 "size": 1000,
+                 "items": [{"path": "/tmp/a", "size": 1000,
+                            "category": "system_cache", "label": "a",
+                            "default_checked": True}]},
+            ],
+            "disk": {"free": 50, "total": 100},
+        }
+        html = disk_cleaner.render_html(inv)
+        self.assertIn("<!DOCTYPE html>", html)
+        self.assertIn("시스템 캐시/로그", html)
+        self.assertIn("/tmp/a", html)
+        self.assertIn("/delete", html)
