@@ -61,15 +61,17 @@ def is_protected(path):
 
 def move_command(path):
     """Build the osascript argv that moves a path to Finder Trash."""
+    escaped = path.replace("\\", "\\\\").replace('"', '\\"')
     script = (
         'tell application "Finder" to delete (POSIX file "%s" as alias)'
-        % path.replace('"', '\\"')
+        % escaped
     )
     return ["osascript", "-e", script]
 
 
 def move_to_trash(path):
     """Move a single path to Trash. Raises ProtectedPathError if guarded."""
+    path = os.path.normpath(os.path.abspath(path))
     if is_protected(path):
         raise ProtectedPathError(path)
     subprocess.run(move_command(path), check=True,

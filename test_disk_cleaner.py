@@ -25,6 +25,14 @@ class DirSizeTest(unittest.TestCase):
     def test_missing_path_returns_zero(self):
         self.assertEqual(disk_cleaner.dir_size("/no/such/path/xyz"), 0)
 
+    def test_symlinks_are_excluded(self):
+        root = tempfile.mkdtemp()
+        real = os.path.join(root, "real.bin")
+        with open(real, "wb") as f:
+            f.write(b"x" * 100)
+        os.symlink(real, os.path.join(root, "link.bin"))
+        self.assertEqual(disk_cleaner.dir_size(root), 100)
+
 
 class ProtectedPathTest(unittest.TestCase):
     def test_system_roots_are_protected(self):
@@ -49,9 +57,14 @@ class MoveToTrashTest(unittest.TestCase):
     def test_command_targets_posix_path(self):
         cmd = disk_cleaner.move_command("/tmp/foo bar")
         self.assertEqual(cmd[0], "osascript")
-        joined = " ".join(cmd)
-        self.assertIn("/tmp/foo bar", joined)
-        self.assertIn("Finder", joined)
+        self.assertIn("/tmp/foo bar", cmd[2])
+        self.assertIn("Finder", cmd[2])
+
+    def test_backslash_in_path_escaped(self):
+        cmd = disk_cleaner.move_command("/tmp/foo\\")
+        script = cmd[2]
+        # backslash doubled, so quoted string is not terminated early
+        self.assertIn('"/tmp/foo\\\\"', script)
 
     def test_protected_path_refused(self):
         with self.assertRaises(disk_cleaner.ProtectedPathError):
