@@ -65,23 +65,34 @@ def is_protected(path):
     return False
 
 
-def move_command(path):
-    """Build the osascript argv that moves a path to Finder Trash."""
-    escaped = path.replace("\\", "\\\\").replace('"', '\\"')
-    script = (
-        'tell application "Finder" to delete (POSIX file "%s" as alias)'
-        % escaped
-    )
-    return ["osascript", "-e", script]
+def move_to_trash(path, trash_dir=None):
+    """Move a path into ~/.Trash by direct filesystem move.
 
-
-def move_to_trash(path):
-    """Move a single path to Trash. Raises ProtectedPathError if guarded."""
+    No Finder/osascript automation, so it never blocks on a TCC prompt.
+    Raises ProtectedPathError if guarded; lets OSError (e.g. PermissionError)
+    propagate so the caller can record it as a failure and continue.
+    Returns the destination path.
+    """
     path = os.path.normpath(os.path.abspath(path))
     if is_protected(path):
         raise ProtectedPathError(path)
-    subprocess.run(move_command(path), check=True,
-                   capture_output=True, text=True)
+    if trash_dir is None:
+        trash_dir = os.path.join(HOME, ".Trash")
+    os.makedirs(trash_dir, exist_ok=True)
+    base = os.path.basename(path.rstrip(os.sep)) or "item"
+    dest = os.path.join(trash_dir, base)
+    if os.path.exists(dest):
+        stem, ext = os.path.splitext(base)
+        n = 1
+        while os.path.exists(dest):
+            dest = os.path.join(trash_dir, "%s %d%s" % (stem, n, ext))
+            n += 1
+    try:
+        os.rename(path, dest)
+    except OSError:
+        # cross-volume or other rename failure -> fall back to copy+remove
+        shutil.move(path, dest)
+    return dest
 
 
 def scan_paths(paths, category, default_checked):
@@ -195,7 +206,12 @@ def build_inventory(
     scan_duplicates=scan_duplicates,
     brew_cache=_brew_cache,
     disk_usage=shutil.disk_usage,
+    progress=None,
 ):
+    def note(msg):
+        if progress is not None:
+            progress(msg)
+
     system_paths = [
         os.path.join(HOME, "Library", "Caches"),
         os.path.join(HOME, "Library", "Logs"),
@@ -208,19 +224,25 @@ def build_inventory(
         os.path.join(HOME, "Library", "Developer", "CoreSimulator", "Caches"),
     ] + brew_cache()
 
+    note("[1/4] 시스템 캐시/로그 스캔...")
+    system_items = scan_paths(system_paths, "system_cache", True)
+    note("[2/4] 개발 캐시 스캔...")
+    dev_items = scan_paths(dev_paths, "dev_cache", True)
+    note("[3/4] 대용량 파일 스캔 (홈 디렉토리, 수십초 소요)...")
+    large_items = scan_large_files(HOME)
+    note("[4/4] 중복 파일 스캔 (다운로드)...")
+    dup_items = scan_duplicates([os.path.join(HOME, "Downloads")])
+
     categories = [
-        {"key": "system_cache", "title": "시스템 캐시/로그",
-         "items": scan_paths(system_paths, "system_cache", True)},
-        {"key": "dev_cache", "title": "개발 캐시",
-         "items": scan_paths(dev_paths, "dev_cache", True)},
-        {"key": "large_files", "title": "대용량 파일",
-         "items": scan_large_files(HOME)},
-        {"key": "duplicates", "title": "중복/다운로드",
-         "items": scan_duplicates([os.path.join(HOME, "Downloads")])},
+        {"key": "system_cache", "title": "시스템 캐시/로그", "items": system_items},
+        {"key": "dev_cache", "title": "개발 캐시", "items": dev_items},
+        {"key": "large_files", "title": "대용량 파일", "items": large_items},
+        {"key": "duplicates", "title": "중복/다운로드", "items": dup_items},
     ]
     for c in categories:
         c["size"] = sum(i["size"] for i in c["items"])
 
+    note("스캔 완료")
     usage = disk_usage("/")
     return {
         "categories": categories,
@@ -228,19 +250,36 @@ def build_inventory(
     }
 
 
-def delete_paths(paths, mover=None):
-    """Move each path to Trash. Returns freed bytes and failure list."""
+def iter_delete(paths, mover=None):
+    """Yield a progress event per path as it is moved to Trash.
+
+    Each event: {i, total, path, ok, freed, and size or reason}. A failure on
+    one path (e.g. PermissionError) is reported and the batch continues.
+    """
     if mover is None:
         mover = move_to_trash
     freed = 0
-    failed = []
-    for p in paths:
+    total = len(paths)
+    for i, p in enumerate(paths, 1):
         size = dir_size(p)
         try:
             mover(p)
             freed += size
+            yield {"i": i, "total": total, "path": p, "ok": True,
+                   "size": size, "freed": freed}
         except Exception as exc:  # noqa: BLE001 - report, never abort batch
-            failed.append({"path": p, "reason": str(exc)})
+            yield {"i": i, "total": total, "path": p, "ok": False,
+                   "reason": str(exc), "freed": freed}
+
+
+def delete_paths(paths, mover=None):
+    """Move each path to Trash. Returns freed bytes and failure list."""
+    freed = 0
+    failed = []
+    for ev in iter_delete(paths, mover=mover):
+        freed = ev["freed"]
+        if not ev["ok"]:
+            failed.append({"path": ev["path"], "reason": ev["reason"]})
     return {"freed": freed, "failed": failed}
 
 
@@ -265,6 +304,19 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
  button{background:#0071e3;color:#fff;border:0;border-radius:8px;padding:10px 18px;font-size:14px;cursor:pointer}
  button.ghost{background:#e8e8ed;color:#1d1d1f}
  footer{position:sticky;bottom:0;background:#fff;padding:14px 24px;border-top:1px solid #ddd;text-align:right}
+ .overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);
+   align-items:center;justify-content:center;z-index:10}
+ .overlay.show{display:flex}
+ .panel{background:#fff;border-radius:12px;padding:24px;width:560px;max-width:90vw;
+   max-height:80vh;display:flex;flex-direction:column}
+ .panel h2{margin:0 0 12px;font-size:16px}
+ .bar{height:10px;background:#e8e8ed;border-radius:5px;overflow:hidden;margin:8px 0}
+ .bar > div{height:100%;width:0;background:#0071e3;transition:width .15s}
+ .prog-text{font-size:13px;color:#86868b;margin-bottom:4px}
+ .cur{font-size:12px;color:#86868b;word-break:break-all;min-height:16px}
+ .fails{margin-top:12px;overflow:auto;font-size:12px;color:#c0392b;flex:1}
+ .fails div{padding:3px 0;border-top:1px solid #f0f0f0;word-break:break-all}
+ .panel .close{display:none;margin-top:16px;align-self:flex-end}
 </style></head><body>
 <header>
  <div><h1>🧹 Mac 용량정리</h1><div id="disk"></div></div>
@@ -273,6 +325,15 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 </header>
 <main id="app"></main>
 <footer><button onclick="confirmDelete()">선택항목 휴지통 이동 →</button></footer>
+<div class="overlay" id="overlay"><div class="panel">
+ <h2 id="prog-title">휴지통으로 이동 중...</h2>
+ <div class="prog-text" id="prog-count">0 / 0</div>
+ <div class="bar"><div id="prog-fill"></div></div>
+ <div class="prog-text" id="prog-freed">확보: 0 B</div>
+ <div class="cur" id="prog-cur"></div>
+ <div class="fails" id="prog-fails"></div>
+ <button class="close" id="prog-close" onclick="location.reload()">닫기</button>
+</div></div>
 <script>
 const DATA = __DATA__;
 function fmt(b){const u=['B','KB','MB','GB','TB'];let i=0,n=b;
@@ -317,15 +378,44 @@ function selected(){return [...document.querySelectorAll('input[data-path]')]
  .filter(b=>b.checked);}
 function update(){const s=selected().reduce((a,b)=>a+(+b.dataset.size),0);
  document.getElementById('selected').textContent='선택됨: '+fmt(s);}
-function confirmDelete(){const sel=selected();
+function setProg(i,total,freed,cur){
+ document.getElementById('prog-count').textContent=i+' / '+total;
+ document.getElementById('prog-fill').style.width=
+  (total?Math.round(i/total*100):0)+'%';
+ document.getElementById('prog-freed').textContent='확보: '+fmt(freed);
+ document.getElementById('prog-cur').textContent=cur;}
+async function confirmDelete(){const sel=selected();
  if(!sel.length){alert('선택된 항목이 없습니다.');return;}
  const total=sel.reduce((a,b)=>a+(+b.dataset.size),0);
  if(!confirm(sel.length+'개 / '+fmt(total)+' 휴지통으로 이동할까요?'))return;
- fetch('/delete',{method:'POST',headers:{'Content-Type':'application/json'},
-  body:JSON.stringify({paths:sel.map(b=>b.dataset.path)})})
- .then(r=>r.json()).then(res=>{
-  alert('완료: '+fmt(res.freed)+' 확보. 실패 '+res.failed.length+'건.');
-  location.reload();}).catch(()=>alert('오류가 발생했습니다.'));}
+ const paths=sel.map(b=>b.dataset.path);
+ const ov=document.getElementById('overlay');ov.classList.add('show');
+ document.getElementById('prog-title').textContent='휴지통으로 이동 중...';
+ document.getElementById('prog-fails').innerHTML='';
+ setProg(0,paths.length,0,'');
+ let resp;
+ try{resp=await fetch('/delete',{method:'POST',
+   headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({paths})});}
+ catch(e){document.getElementById('prog-title').textContent='네트워크 오류';
+  document.getElementById('prog-close').style.display='inline-block';return;}
+ const reader=resp.body.getReader(),dec=new TextDecoder();
+ let buf='',fails=0,freed=0,doneN=0;
+ while(true){
+  const {value,done}=await reader.read();if(done)break;
+  buf+=dec.decode(value,{stream:true});let nl;
+  while((nl=buf.indexOf('\n'))>=0){
+   const line=buf.slice(0,nl);buf=buf.slice(nl+1);
+   if(!line.trim())continue;
+   const ev=JSON.parse(line);doneN=ev.i;freed=ev.freed;
+   setProg(ev.i,ev.total,ev.freed,(ev.ok?'✓ ':'✗ ')+ev.path);
+   if(!ev.ok){fails++;const d=document.createElement('div');
+    d.textContent='실패: '+ev.path+' ('+ev.reason+')';
+    document.getElementById('prog-fails').appendChild(d);}}}
+ document.getElementById('prog-title').textContent=
+  '완료 — '+fmt(freed)+' 확보, 실패 '+fails+'건';
+ document.getElementById('prog-cur').textContent='';
+ document.getElementById('prog-close').style.display='inline-block';}
 render();
 </script></body></html>"""
 
@@ -364,9 +454,18 @@ class CleanerHandler(BaseHTTPRequestHandler):
             self._send(400, json.dumps({"error": "bad request"}),
                        "application/json; charset=utf-8")
             return
-        result = delete_paths(payload.get("paths", []))
-        self._send(200, json.dumps(result, ensure_ascii=False),
-                   "application/json; charset=utf-8")
+        paths = payload.get("paths", [])
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        for ev in iter_delete(paths):
+            line = (json.dumps(ev, ensure_ascii=False) + "\n").encode("utf-8")
+            try:
+                self.wfile.write(line)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                break
 
     def log_message(self, *args):
         pass
@@ -386,7 +485,7 @@ def find_port(start=8765):
 def main():
     global _INVENTORY
     print("스캔 중...")
-    _INVENTORY = build_inventory()
+    _INVENTORY = build_inventory(progress=lambda m: print(m, flush=True))
     port = find_port()
     url = "http://127.0.0.1:%d/" % port
     server = ThreadingHTTPServer(("127.0.0.1", port), CleanerHandler)

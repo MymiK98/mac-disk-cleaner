@@ -57,17 +57,37 @@ class ProtectedPathTest(unittest.TestCase):
 
 
 class MoveToTrashTest(unittest.TestCase):
-    def test_command_targets_posix_path(self):
-        cmd = disk_cleaner.move_command("/tmp/foo bar")
-        self.assertEqual(cmd[0], "osascript")
-        self.assertIn("/tmp/foo bar", cmd[2])
-        self.assertIn("Finder", cmd[2])
+    def test_moves_file_into_trash_dir(self):
+        root = tempfile.mkdtemp()
+        trash = tempfile.mkdtemp()
+        src = os.path.join(root, "junk.bin")
+        with open(src, "wb") as f:
+            f.write(b"x" * 100)
 
-    def test_backslash_in_path_escaped(self):
-        cmd = disk_cleaner.move_command("/tmp/foo\\")
-        script = cmd[2]
-        # backslash doubled, so quoted string is not terminated early
-        self.assertIn('"/tmp/foo\\\\"', script)
+        dest = disk_cleaner.move_to_trash(src, trash_dir=trash)
+
+        self.assertFalse(os.path.exists(src))
+        self.assertTrue(os.path.exists(dest))
+        self.assertEqual(os.path.dirname(dest), trash)
+        self.assertEqual(os.path.basename(dest), "junk.bin")
+
+    def test_name_collision_gets_suffix(self):
+        root = tempfile.mkdtemp()
+        trash = tempfile.mkdtemp()
+        # pre-existing file in trash with the same name
+        with open(os.path.join(trash, "dup.bin"), "wb") as f:
+            f.write(b"old")
+        src = os.path.join(root, "dup.bin")
+        with open(src, "wb") as f:
+            f.write(b"new")
+
+        dest = disk_cleaner.move_to_trash(src, trash_dir=trash)
+
+        self.assertTrue(os.path.exists(dest))
+        self.assertNotEqual(os.path.basename(dest), "dup.bin")
+        # original pre-existing file untouched
+        with open(os.path.join(trash, "dup.bin"), "rb") as f:
+            self.assertEqual(f.read(), b"old")
 
     def test_protected_path_refused(self):
         with self.assertRaises(disk_cleaner.ProtectedPathError):
@@ -199,6 +219,30 @@ class DeletePathsTest(unittest.TestCase):
         self.assertEqual(len(result["failed"]), 1)
         self.assertEqual(result["failed"][0]["path"], "/tmp/whatever")
 
+    def test_iter_delete_continues_past_permission_failure(self):
+        root = tempfile.mkdtemp()
+        ok_path = os.path.join(root, "ok.bin")
+        with open(ok_path, "wb") as f:
+            f.write(b"x" * 500)
+        bad_path = os.path.join(root, "bad.bin")
+        with open(bad_path, "wb") as f:
+            f.write(b"y" * 999)
+
+        def mover(path):
+            if path == bad_path:
+                raise PermissionError("Operation not permitted")
+
+        events = list(disk_cleaner.iter_delete(
+            [bad_path, ok_path], mover=mover))
+
+        # both processed despite the first one failing
+        self.assertEqual(len(events), 2)
+        self.assertFalse(events[0]["ok"])
+        self.assertIn("not permitted", events[0]["reason"])
+        self.assertTrue(events[1]["ok"])
+        # freed reflects only the successful move
+        self.assertEqual(events[1]["freed"], 500)
+
 
 class RenderHtmlTest(unittest.TestCase):
     def test_embeds_data_and_categories(self):
@@ -235,15 +279,21 @@ class RenderHtmlTest(unittest.TestCase):
 class ServerTest(unittest.TestCase):
     def setUp(self):
         self._orig_inv = disk_cleaner._INVENTORY
-        self._orig_delete = disk_cleaner.delete_paths
+        self._orig_iter = disk_cleaner.iter_delete
         disk_cleaner._INVENTORY = {
             "categories": [{"key": "system_cache", "title": "t", "size": 0,
                             "items": []}],
             "disk": {"free": 1, "total": 2},
         }
         self.calls = []
-        disk_cleaner.delete_paths = lambda paths: (
-            self.calls.append(paths) or {"freed": 123, "failed": []})
+
+        def fake_iter(paths):
+            self.calls.append(paths)
+            for i, p in enumerate(paths, 1):
+                yield {"i": i, "total": len(paths), "path": p,
+                       "ok": True, "size": 10, "freed": 10 * i}
+
+        disk_cleaner.iter_delete = fake_iter
         port = disk_cleaner.find_port()
         from http.server import ThreadingHTTPServer
         self.server = ThreadingHTTPServer(("127.0.0.1", port),
@@ -257,7 +307,7 @@ class ServerTest(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         disk_cleaner._INVENTORY = self._orig_inv
-        disk_cleaner.delete_paths = self._orig_delete
+        disk_cleaner.iter_delete = self._orig_iter
 
     def _conn(self):
         return http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -272,15 +322,20 @@ class ServerTest(unittest.TestCase):
         c = self._conn(); c.request("GET", "/nope")
         self.assertEqual(c.getresponse().status, 404)
 
-    def test_post_delete_calls_handler(self):
+    def test_post_delete_streams_ndjson_progress(self):
         c = self._conn()
-        body = json.dumps({"paths": ["/tmp/x"]})
+        body = json.dumps({"paths": ["/tmp/x", "/tmp/y"]})
         c.request("POST", "/delete", body=body,
                   headers={"Content-Type": "application/json"})
         r = c.getresponse()
         self.assertEqual(r.status, 200)
-        self.assertEqual(json.loads(r.read())["freed"], 123)
-        self.assertEqual(self.calls, [["/tmp/x"]])
+        lines = [ln for ln in r.read().decode().split("\n") if ln.strip()]
+        events = [json.loads(ln) for ln in lines]
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["i"], 1)
+        self.assertEqual(events[-1]["freed"], 20)
+        self.assertTrue(all(e["ok"] for e in events))
+        self.assertEqual(self.calls, [["/tmp/x", "/tmp/y"]])
 
     def test_post_bad_json_400(self):
         c = self._conn()
