@@ -43,3 +43,16 @@ class ProtectedPathTest(unittest.TestCase):
         home = os.path.expanduser("~")
         target = os.path.join(home, "Library", "Caches", "com.apple.Safari")
         self.assertFalse(disk_cleaner.is_protected(target))
+
+
+class MoveToTrashTest(unittest.TestCase):
+    def test_command_targets_posix_path(self):
+        cmd = disk_cleaner.move_command("/tmp/foo bar")
+        self.assertEqual(cmd[0], "osascript")
+        joined = " ".join(cmd)
+        self.assertIn("/tmp/foo bar", joined)
+        self.assertIn("Finder", joined)
+
+    def test_protected_path_refused(self):
+        with self.assertRaises(disk_cleaner.ProtectedPathError):
+            disk_cleaner.move_to_trash("/System")
