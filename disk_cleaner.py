@@ -215,3 +215,19 @@ def build_inventory():
         "categories": categories,
         "disk": {"free": usage.free, "total": usage.total},
     }
+
+
+def delete_paths(paths, mover=None):
+    """Move each path to Trash. Returns freed bytes and failure list."""
+    if mover is None:
+        mover = move_to_trash
+    freed = 0
+    failed = []
+    for p in paths:
+        size = dir_size(p)
+        try:
+            mover(p)
+            freed += size
+        except Exception as exc:  # noqa: BLE001 - report, never abort batch
+            failed.append({"path": p, "reason": str(exc)})
+    return {"freed": freed, "failed": failed}

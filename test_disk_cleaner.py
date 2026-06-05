@@ -160,3 +160,31 @@ class InventoryTest(unittest.TestCase):
             self.assertIn("items", c)
             self.assertIn("size", c)
         self.assertIn("disk", inv)
+
+
+class DeletePathsTest(unittest.TestCase):
+    def test_sums_freed_and_records_failures(self):
+        root = tempfile.mkdtemp()
+        good = os.path.join(root, "good.bin")
+        with open(good, "wb") as f:
+            f.write(b"x" * 1000)
+
+        moved = []
+
+        def fake_mover(path):
+            moved.append(path)
+
+        result = disk_cleaner.delete_paths([good], mover=fake_mover)
+
+        self.assertEqual(result["freed"], 1000)
+        self.assertEqual(result["failed"], [])
+        self.assertEqual(moved, [good])
+
+    def test_failure_recorded_not_raised(self):
+        def boom(path):
+            raise RuntimeError("denied")
+
+        result = disk_cleaner.delete_paths(["/tmp/whatever"], mover=boom)
+        self.assertEqual(result["freed"], 0)
+        self.assertEqual(len(result["failed"]), 1)
+        self.assertEqual(result["failed"][0]["path"], "/tmp/whatever")
