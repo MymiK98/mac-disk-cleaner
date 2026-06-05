@@ -1,0 +1,11 @@
+#!/bin/bash
+# .app 더블클릭 → Terminal에서 cleaner 실행(Ctrl+C로 종료 가능).
+# 앱 번들 위치 기준으로 프로젝트 폴더(.command) 탐색.
+HERE="$(cd "$(dirname "$0")" && pwd)"            # .../DiskCleaner.app/Contents/MacOS
+PROJ="$(cd "$HERE/../../.." && pwd)"             # 프로젝트 폴더
+CMD="$PROJ/DiskCleaner.command"
+if [ -f "$CMD" ]; then
+    open "$CMD"
+else
+    osascript -e 'display alert "DiskCleaner" message "DiskCleaner.command 를 찾을 수 없습니다. DiskCleaner.app 을 프로젝트 폴더(disk_cleaner.py 와 같은 위치) 안에 두고 실행하세요."'
+fi
