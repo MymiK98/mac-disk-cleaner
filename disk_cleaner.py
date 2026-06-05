@@ -283,7 +283,9 @@ def delete_paths(paths, mover=None):
     return {"freed": freed, "failed": failed}
 
 
-PAGE_TEMPLATE = """<!DOCTYPE html>
+# raw string: JS escape sequences like '\n' must reach the browser verbatim,
+# not be interpreted by Python.
+PAGE_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="ko"><head><meta charset="utf-8">
 <title>Mac 용량정리</title>
 <style>

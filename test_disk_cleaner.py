@@ -275,6 +275,14 @@ class RenderHtmlTest(unittest.TestCase):
         html = disk_cleaner.render_html(inv)  # must not raise
         self.assertIn("/tmp/cache-100%-x.bin", html)
 
+    def test_js_newline_literal_not_interpreted(self):
+        # PAGE_TEMPLATE is a raw string: the JS token indexOf('\n') must reach
+        # the browser as backslash-n, not an actual newline (which breaks JS).
+        html = disk_cleaner.render_html(disk_cleaner._INVENTORY)
+        self.assertIn(r"indexOf('\n')", html)
+        # and there must be no real newline inside that JS string literal
+        self.assertNotIn("indexOf('\n')", html)
+
 
 class ServerTest(unittest.TestCase):
     def setUp(self):
