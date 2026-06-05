@@ -90,3 +90,20 @@ class ScanPathsTest(unittest.TestCase):
         self.assertEqual(item["category"], "dev_cache")
         self.assertTrue(item["default_checked"])
         self.assertEqual(item["label"], "cache")
+
+
+class LargeFilesTest(unittest.TestCase):
+    def test_finds_only_files_over_threshold(self):
+        root = tempfile.mkdtemp()
+        with open(os.path.join(root, "big.bin"), "wb") as f:
+            f.write(b"a" * 3000)
+        with open(os.path.join(root, "small.bin"), "wb") as f:
+            f.write(b"a" * 10)
+
+        items = disk_cleaner.scan_large_files(root, threshold=1000)
+
+        paths = [i["path"] for i in items]
+        self.assertIn(os.path.join(root, "big.bin"), paths)
+        self.assertNotIn(os.path.join(root, "small.bin"), paths)
+        self.assertFalse(items[0]["default_checked"])
+        self.assertEqual(items[0]["category"], "large_files")

@@ -95,3 +95,27 @@ def scan_paths(paths, category, default_checked):
             "default_checked": default_checked,
         })
     return items
+
+
+def scan_large_files(root, threshold=500 * 1024 * 1024):
+    """Find individual files larger than threshold bytes under root."""
+    items = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            fp = os.path.join(dirpath, name)
+            try:
+                if os.path.islink(fp):
+                    continue
+                size = os.path.getsize(fp)
+            except OSError:
+                continue
+            if size >= threshold:
+                items.append({
+                    "path": fp,
+                    "size": size,
+                    "category": "large_files",
+                    "label": name,
+                    "default_checked": False,
+                })
+    items.sort(key=lambda i: i["size"], reverse=True)
+    return items
