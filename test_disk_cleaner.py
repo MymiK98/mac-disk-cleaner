@@ -145,3 +145,18 @@ class DuplicatesTest(unittest.TestCase):
             f.write(b"B" * 500)
         items = disk_cleaner.scan_duplicates([root])
         self.assertEqual(items, [])
+
+
+class InventoryTest(unittest.TestCase):
+    def test_returns_all_categories_and_total(self):
+        inv = disk_cleaner.build_inventory()
+        self.assertIn("categories", inv)
+        keys = {c["key"] for c in inv["categories"]}
+        self.assertEqual(
+            keys,
+            {"system_cache", "dev_cache", "large_files", "duplicates"},
+        )
+        for c in inv["categories"]:
+            self.assertIn("items", c)
+            self.assertIn("size", c)
+        self.assertIn("disk", inv)

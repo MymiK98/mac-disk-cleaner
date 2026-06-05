@@ -1,5 +1,6 @@
 import hashlib
 import os
+import shutil
 import subprocess
 
 
@@ -172,3 +173,45 @@ def scan_duplicates(roots):
             else:
                 seen_hashes[digest] = fp
     return items
+
+
+def _brew_cache():
+    try:
+        out = subprocess.run(["brew", "--cache"], capture_output=True,
+                             text=True, check=True)
+        return [out.stdout.strip()]
+    except (OSError, subprocess.CalledProcessError):
+        return []
+
+
+def build_inventory():
+    system_paths = [
+        os.path.join(HOME, "Library", "Caches"),
+        os.path.join(HOME, "Library", "Logs"),
+        os.path.join(HOME, ".Trash"),
+    ]
+    dev_paths = [
+        os.path.join(HOME, ".npm"),
+        os.path.join(HOME, ".cache"),
+        os.path.join(HOME, "Library", "Developer", "Xcode", "DerivedData"),
+        os.path.join(HOME, "Library", "Developer", "CoreSimulator", "Caches"),
+    ] + _brew_cache()
+
+    categories = [
+        {"key": "system_cache", "title": "시스템 캐시/로그",
+         "items": scan_paths(system_paths, "system_cache", True)},
+        {"key": "dev_cache", "title": "개발 캐시",
+         "items": scan_paths(dev_paths, "dev_cache", True)},
+        {"key": "large_files", "title": "대용량 파일",
+         "items": scan_large_files(HOME)},
+        {"key": "duplicates", "title": "중복/다운로드",
+         "items": scan_duplicates([os.path.join(HOME, "Downloads")])},
+    ]
+    for c in categories:
+        c["size"] = sum(i["size"] for i in c["items"])
+
+    usage = shutil.disk_usage("/")
+    return {
+        "categories": categories,
+        "disk": {"free": usage.free, "total": usage.total},
+    }
