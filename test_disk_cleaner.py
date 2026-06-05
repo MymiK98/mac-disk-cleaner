@@ -24,3 +24,22 @@ class DirSizeTest(unittest.TestCase):
 
     def test_missing_path_returns_zero(self):
         self.assertEqual(disk_cleaner.dir_size("/no/such/path/xyz"), 0)
+
+
+class ProtectedPathTest(unittest.TestCase):
+    def test_system_roots_are_protected(self):
+        for p in ["/System", "/Library", "/usr", "/bin", "/Applications"]:
+            self.assertTrue(disk_cleaner.is_protected(p), p)
+
+    def test_home_root_and_library_protected(self):
+        home = os.path.expanduser("~")
+        self.assertTrue(disk_cleaner.is_protected(home))
+        self.assertTrue(disk_cleaner.is_protected(os.path.join(home, "Library")))
+
+    def test_parent_of_protected_is_protected(self):
+        self.assertTrue(disk_cleaner.is_protected("/"))
+
+    def test_cache_subfolder_not_protected(self):
+        home = os.path.expanduser("~")
+        target = os.path.join(home, "Library", "Caches", "com.apple.Safari")
+        self.assertFalse(disk_cleaner.is_protected(target))
