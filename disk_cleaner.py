@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -277,6 +278,10 @@ const DATA = %s;
 function fmt(b){const u=['B','KB','MB','GB','TB'];let i=0,n=b;
  while(n>=1024&&i<u.length-1){n/=1024;i++;}return n.toFixed(i?1:0)+' '+u[i];}
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+function syncCat(catBox,items){const boxes=items.querySelectorAll('input');
+ const n=[...boxes].filter(b=>b.checked).length;
+ catBox.checked=boxes.length>0&&n===boxes.length;
+ catBox.indeterminate=n>0&&n<boxes.length;}
 function render(){
  document.getElementById('disk').textContent =
   '디스크: '+fmt(DATA.disk.free)+' 빈공간 / '+fmt(DATA.disk.total);
@@ -303,9 +308,9 @@ function render(){
     '<div><div>'+esc(it.label)+'</div><div class="path">'+esc(it.path)+'</div></div>'+
     '<span class="size">'+fmt(it.size)+'</span>';
    row.querySelector('input').dataset.path=it.path;
-   row.querySelector('input').onchange=update;
+   row.querySelector('input').onchange=()=>{syncCat(catBox,items);update();};
    items.appendChild(row);});
-  if(c.items.length){catBox.checked=c.items.every(it=>it.default_checked);}
+  syncCat(catBox,items);
   cat.appendChild(head);cat.appendChild(items);app.appendChild(cat);});
  update();}
 function selected(){return [...document.querySelectorAll('input[data-path]')]
@@ -320,7 +325,7 @@ function confirmDelete(){const sel=selected();
   body:JSON.stringify({paths:sel.map(b=>b.dataset.path)})})
  .then(r=>r.json()).then(res=>{
   alert('완료: '+fmt(res.freed)+' 확보. 실패 '+res.failed.length+'건.');
-  location.reload();});}
+  location.reload();}).catch(()=>alert('오류가 발생했습니다.'));}
 render();
 </script></body></html>"""
 
@@ -351,8 +356,13 @@ class CleanerHandler(BaseHTTPRequestHandler):
         if self.path != "/delete":
             self._send(404, "not found")
             return
-        length = int(self.headers.get("Content-Length", 0))
-        payload = json.loads(self.rfile.read(length) or b"{}")
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        try:
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (json.JSONDecodeError, ValueError):
+            self._send(400, json.dumps({"error": "bad request"}),
+                       "application/json; charset=utf-8")
+            return
         result = delete_paths(payload.get("paths", []))
         self._send(200, json.dumps(result, ensure_ascii=False),
                    "application/json; charset=utf-8")
@@ -362,11 +372,13 @@ class CleanerHandler(BaseHTTPRequestHandler):
 
 
 def find_port(start=8765):
-    import socket
     for port in range(start, start + 50):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            if s.connect_ex(("127.0.0.1", port)) != 0:
+            try:
+                s.bind(("127.0.0.1", port))
                 return port
+            except OSError:
+                continue
     raise RuntimeError("no free port")
 
 
