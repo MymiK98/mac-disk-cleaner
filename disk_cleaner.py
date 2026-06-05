@@ -179,12 +179,19 @@ def _brew_cache():
     try:
         out = subprocess.run(["brew", "--cache"], capture_output=True,
                              text=True, check=True)
-        return [out.stdout.strip()]
     except (OSError, subprocess.CalledProcessError):
         return []
+    path = out.stdout.strip()
+    return [path] if path else []
 
 
-def build_inventory():
+def build_inventory(
+    scan_paths=scan_paths,
+    scan_large_files=scan_large_files,
+    scan_duplicates=scan_duplicates,
+    brew_cache=_brew_cache,
+    disk_usage=shutil.disk_usage,
+):
     system_paths = [
         os.path.join(HOME, "Library", "Caches"),
         os.path.join(HOME, "Library", "Logs"),
@@ -195,7 +202,7 @@ def build_inventory():
         os.path.join(HOME, ".cache"),
         os.path.join(HOME, "Library", "Developer", "Xcode", "DerivedData"),
         os.path.join(HOME, "Library", "Developer", "CoreSimulator", "Caches"),
-    ] + _brew_cache()
+    ] + brew_cache()
 
     categories = [
         {"key": "system_cache", "title": "시스템 캐시/로그",
@@ -210,7 +217,7 @@ def build_inventory():
     for c in categories:
         c["size"] = sum(i["size"] for i in c["items"])
 
-    usage = shutil.disk_usage("/")
+    usage = disk_usage("/")
     return {
         "categories": categories,
         "disk": {"free": usage.free, "total": usage.total},

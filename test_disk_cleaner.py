@@ -149,8 +149,15 @@ class DuplicatesTest(unittest.TestCase):
 
 class InventoryTest(unittest.TestCase):
     def test_returns_all_categories_and_total(self):
-        inv = disk_cleaner.build_inventory()
-        self.assertIn("categories", inv)
+        stub_item = {"path": "/x", "size": 10, "category": "c",
+                     "label": "x", "default_checked": True}
+        inv = disk_cleaner.build_inventory(
+            scan_paths=lambda paths, category, default_checked: [stub_item],
+            scan_large_files=lambda root: [],
+            scan_duplicates=lambda roots: [],
+            brew_cache=lambda: [],
+            disk_usage=lambda p: type("U", (), {"free": 50, "total": 100})(),
+        )
         keys = {c["key"] for c in inv["categories"]}
         self.assertEqual(
             keys,
@@ -159,7 +166,7 @@ class InventoryTest(unittest.TestCase):
         for c in inv["categories"]:
             self.assertIn("items", c)
             self.assertIn("size", c)
-        self.assertIn("disk", inv)
+        self.assertEqual(inv["disk"], {"free": 50, "total": 100})
 
 
 class DeletePathsTest(unittest.TestCase):
