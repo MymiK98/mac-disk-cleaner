@@ -1,5 +1,8 @@
+import http.client
+import json
 import os
 import tempfile
+import threading
 import unittest
 
 import disk_cleaner
@@ -214,3 +217,73 @@ class RenderHtmlTest(unittest.TestCase):
         self.assertIn("시스템 캐시/로그", html)
         self.assertIn("/tmp/a", html)
         self.assertIn("/delete", html)
+
+    def test_percent_in_path_does_not_crash(self):
+        inv = {
+            "categories": [
+                {"key": "system_cache", "title": "t", "size": 5,
+                 "items": [{"path": "/tmp/cache-100%-x.bin", "size": 5,
+                            "category": "system_cache", "label": "c",
+                            "default_checked": True}]},
+            ],
+            "disk": {"free": 1, "total": 2},
+        }
+        html = disk_cleaner.render_html(inv)  # must not raise
+        self.assertIn("/tmp/cache-100%-x.bin", html)
+
+
+class ServerTest(unittest.TestCase):
+    def setUp(self):
+        self._orig_inv = disk_cleaner._INVENTORY
+        self._orig_delete = disk_cleaner.delete_paths
+        disk_cleaner._INVENTORY = {
+            "categories": [{"key": "system_cache", "title": "t", "size": 0,
+                            "items": []}],
+            "disk": {"free": 1, "total": 2},
+        }
+        self.calls = []
+        disk_cleaner.delete_paths = lambda paths: (
+            self.calls.append(paths) or {"freed": 123, "failed": []})
+        port = disk_cleaner.find_port()
+        from http.server import ThreadingHTTPServer
+        self.server = ThreadingHTTPServer(("127.0.0.1", port),
+                                          disk_cleaner.CleanerHandler)
+        self.port = port
+        self.thread = threading.Thread(target=self.server.serve_forever,
+                                       daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        disk_cleaner._INVENTORY = self._orig_inv
+        disk_cleaner.delete_paths = self._orig_delete
+
+    def _conn(self):
+        return http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+
+    def test_get_root_serves_html(self):
+        c = self._conn(); c.request("GET", "/")
+        r = c.getresponse()
+        self.assertEqual(r.status, 200)
+        self.assertIn(b"<!DOCTYPE html>", r.read())
+
+    def test_get_unknown_404(self):
+        c = self._conn(); c.request("GET", "/nope")
+        self.assertEqual(c.getresponse().status, 404)
+
+    def test_post_delete_calls_handler(self):
+        c = self._conn()
+        body = json.dumps({"paths": ["/tmp/x"]})
+        c.request("POST", "/delete", body=body,
+                  headers={"Content-Type": "application/json"})
+        r = c.getresponse()
+        self.assertEqual(r.status, 200)
+        self.assertEqual(json.loads(r.read())["freed"], 123)
+        self.assertEqual(self.calls, [["/tmp/x"]])
+
+    def test_post_bad_json_400(self):
+        c = self._conn()
+        c.request("POST", "/delete", body="{not json",
+                  headers={"Content-Type": "application/json"})
+        self.assertEqual(c.getresponse().status, 400)

@@ -274,7 +274,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <main id="app"></main>
 <footer><button onclick="confirmDelete()">선택항목 휴지통 이동 →</button></footer>
 <script>
-const DATA = %s;
+const DATA = __DATA__;
 function fmt(b){const u=['B','KB','MB','GB','TB'];let i=0,n=b;
  while(n>=1024&&i<u.length-1){n/=1024;i++;}return n.toFixed(i?1:0)+' '+u[i];}
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
@@ -331,7 +331,8 @@ render();
 
 
 def render_html(inventory):
-    return PAGE_TEMPLATE % json.dumps(inventory, ensure_ascii=False)
+    data_json = json.dumps(inventory, ensure_ascii=False)
+    return PAGE_TEMPLATE.replace("__DATA__", data_json, 1)
 
 
 _INVENTORY = {"categories": [], "disk": {"free": 0, "total": 0}}
