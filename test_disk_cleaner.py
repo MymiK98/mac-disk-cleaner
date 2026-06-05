@@ -166,6 +166,45 @@ class ScanChildrenTest(unittest.TestCase):
             [])
 
 
+class LockedItemsTest(unittest.TestCase):
+    def test_user_can_delete_owned_vs_root(self):
+        fd, p = tempfile.mkstemp()
+        os.close(fd)
+        self.assertTrue(disk_cleaner.user_can_delete(p))
+        # root-owned system binary -> not deletable by current user
+        self.assertFalse(disk_cleaner.user_can_delete("/usr/bin/true"))
+        self.assertFalse(disk_cleaner.user_can_delete("/no/such/path"))
+
+    def test_build_inventory_marks_locked_and_unchecks(self):
+        fd, owned = tempfile.mkstemp()
+        os.close(fd)
+
+        def items(parents, category, default_checked):
+            return [
+                {"path": owned, "size": 1, "category": "system_cache",
+                 "label": "mine", "default_checked": True},
+                {"path": "/usr/bin/true", "size": 1,
+                 "category": "system_cache", "label": "root",
+                 "default_checked": True},
+            ]
+
+        inv = disk_cleaner.build_inventory(
+            scan_paths=lambda p, c, d: [],
+            scan_children=items,
+            scan_large_files=lambda r: [],
+            scan_duplicates=lambda r: [],
+            brew_cache=lambda: [],
+            disk_usage=lambda p: type("U", (), {"free": 1, "total": 2})(),
+        )
+        sysc = [c for c in inv["categories"]
+                if c["key"] == "system_cache"][0]
+        by = {i["label"]: i for i in sysc["items"]}
+        self.assertFalse(by["mine"]["locked"])
+        self.assertTrue(by["mine"]["default_checked"])
+        self.assertTrue(by["root"]["locked"])
+        self.assertFalse(by["root"]["default_checked"])
+
+
 class ScanPathsTest(unittest.TestCase):
     def test_builds_items_for_existing_paths_only(self):
         root = tempfile.mkdtemp()
@@ -356,6 +395,21 @@ class RenderHtmlTest(unittest.TestCase):
         # and there must be no real newline inside that JS string literal
         self.assertNotIn("indexOf('\n')", html)
 
+    def test_locked_item_present_in_data(self):
+        inv = {
+            "categories": [
+                {"key": "system_cache", "title": "t", "size": 1,
+                 "items": [{"path": "/x", "size": 1,
+                            "category": "system_cache", "label": "L",
+                            "default_checked": False, "locked": True}]},
+            ],
+            "disk": {"free": 1, "total": 2},
+        }
+        html = disk_cleaner.render_html(inv)
+        self.assertIn('"locked": true', html)  # flows into DATA
+        self.assertIn("🔒", html)              # lock UI present
+        self.assertIn("권한 설정", html)        # perms button present
+
 
 class ServerTest(unittest.TestCase):
     def setUp(self):
@@ -423,3 +477,17 @@ class ServerTest(unittest.TestCase):
         c.request("POST", "/delete", body="{not json",
                   headers={"Content-Type": "application/json"})
         self.assertEqual(c.getresponse().status, 400)
+
+    def test_post_open_fulldisk(self):
+        orig = disk_cleaner.open_fulldisk_settings
+        called = []
+        disk_cleaner.open_fulldisk_settings = lambda: called.append(1)
+        try:
+            c = self._conn()
+            c.request("POST", "/open-fulldisk")
+            r = c.getresponse()
+            self.assertEqual(r.status, 200)
+            self.assertTrue(json.loads(r.read())["ok"])
+        finally:
+            disk_cleaner.open_fulldisk_settings = orig
+        self.assertEqual(called, [1])

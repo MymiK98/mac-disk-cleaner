@@ -66,6 +66,18 @@ def is_protected(path):
     return False
 
 
+def user_can_delete(path):
+    """True if the current user owns the path (so a move-to-Trash can succeed).
+
+    Root-owned items (e.g. caches installed by a pkg) can't be trashed without
+    admin rights -- we mark those locked instead of letting the move fail.
+    """
+    try:
+        return os.stat(path).st_uid == os.getuid()
+    except OSError:
+        return False
+
+
 def move_to_trash(path, trash_dir=None):
     """Move a path into ~/.Trash by direct filesystem move.
 
@@ -278,6 +290,10 @@ def build_inventory(
         {"key": "duplicates", "title": "중복/다운로드", "items": dup_items},
     ]
     for c in categories:
+        for it in c["items"]:
+            it["locked"] = not user_can_delete(it["path"])
+            if it["locked"]:
+                it["default_checked"] = False
         c["size"] = sum(i["size"] for i in c["items"])
 
     note("스캔 완료")
@@ -321,6 +337,18 @@ def delete_paths(paths, mover=None):
     return {"freed": freed, "failed": failed}
 
 
+FULLDISK_PANE = ("x-apple.systempreferences:com.apple.preference.security"
+                 "?Privacy_AllFiles")
+
+
+def open_fulldisk_settings():
+    """Open System Settings at the Full Disk Access pane."""
+    try:
+        subprocess.run(["open", FULLDISK_PANE], check=False)
+    except OSError:
+        pass
+
+
 # raw string: JS escape sequences like '\n' must reach the browser verbatim,
 # not be interpreted by Python.
 PAGE_TEMPLATE = r"""<!DOCTYPE html>
@@ -357,10 +385,20 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
  .fails{margin-top:12px;overflow:auto;font-size:12px;color:#c0392b;flex:1}
  .fails div{padding:3px 0;border-top:1px solid #f0f0f0;word-break:break-all}
  .panel .close{display:none;margin-top:16px;align-self:flex-end}
+ .row.locked{opacity:.55}
+ .row.locked .lock{font-size:12px;color:#86868b}
+ .perm-sec{padding:14px 0;border-top:1px solid #eee}
+ .perm-sec:first-of-type{border-top:0}
+ .perm-sec h3{margin:0 0 6px;font-size:14px}
+ .perm-sec p{margin:0 0 10px;font-size:13px;color:#555;line-height:1.5}
+ .perm-sec code{background:#f0f0f2;padding:2px 6px;border-radius:4px;
+   font-size:12px;user-select:all;word-break:break-all}
+ .panel .perm-close{align-self:flex-end;margin-top:8px}
 </style></head><body>
 <header>
  <div><h1>🧹 Mac 용량정리</h1><div id="disk"></div></div>
  <div><span class="sel" id="selected">선택됨: 0 B</span>
+  <button class="ghost" onclick="openPerms()">권한 설정</button>
   <button class="ghost" onclick="location.reload()">재스캔</button></div>
 </header>
 <main id="app"></main>
@@ -374,12 +412,30 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
  <div class="fails" id="prog-fails"></div>
  <button class="close" id="prog-close" onclick="location.reload()">닫기</button>
 </div></div>
+<div class="overlay" id="perm-overlay"><div class="panel">
+ <h2>권한 설정</h2>
+ <div class="perm-sec">
+  <h3>전체 디스크 접근 권한</h3>
+  <p>Safari·HomeKit·CloudKit 등 일부 앱 캐시는 macOS가 보호합니다.
+   삭제하려면 <b>터미널</b>(또는 Python)을 전체 디스크 접근 권한에 추가하세요.
+   추가 후 도구를 재실행하면 적용됩니다.</p>
+  <button onclick="openFullDisk()">시스템 설정 열기</button>
+ </div>
+ <div class="perm-sec">
+  <h3>🔒 관리자 권한 항목 <span id="perm-locked-n"></span></h3>
+  <p>다른 사용자(root)가 소유한 항목은 휴지통으로 옮길 수 없어 🔒 로 표시되며
+   선택이 비활성화됩니다. 꼭 지우려면 터미널에서 관리자 권한으로 실행하세요:</p>
+  <p><code id="perm-sudo-cmd">sudo rm -rf &lt;경로&gt;</code></p>
+ </div>
+ <button class="ghost perm-close" onclick="closePerms()">닫기</button>
+</div></div>
 <script>
 const DATA = __DATA__;
 function fmt(b){const u=['B','KB','MB','GB','TB'];let i=0,n=b;
  while(n>=1024&&i<u.length-1){n/=1024;i++;}return n.toFixed(i?1:0)+' '+u[i];}
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
-function syncCat(catBox,items){const boxes=items.querySelectorAll('input');
+function syncCat(catBox,items){
+ const boxes=items.querySelectorAll('input:not([disabled])');
  const n=[...boxes].filter(b=>b.checked).length;
  catBox.checked=boxes.length>0&&n===boxes.length;
  catBox.indeterminate=n>0&&n<boxes.length;}
@@ -401,21 +457,39 @@ function render(){
    items.classList.toggle('open');
    head.querySelector('.tri').textContent=items.classList.contains('open')?'▼':'▶';};
   const catBox=head.querySelector('input');
-  catBox.onchange=()=>{items.querySelectorAll('input').forEach(b=>b.checked=catBox.checked);update();};
+  catBox.onchange=()=>{
+   items.querySelectorAll('input:not([disabled])').forEach(b=>b.checked=catBox.checked);
+   update();};
   c.items.forEach((it)=>{
-   const row=document.createElement('div');row.className='row';
+   const row=document.createElement('div');
+   row.className='row'+(it.locked?' locked':'');
+   const lock=it.locked?'<span class="lock">🔒 관리자 필요</span>':'';
    row.innerHTML='<input type="checkbox" data-size="'+it.size+'"'+
-    (it.default_checked?' checked':'')+'>'+
-    '<div><div>'+esc(it.label)+'</div><div class="path">'+esc(it.path)+'</div></div>'+
+    (it.locked?' disabled':(it.default_checked?' checked':''))+'>'+
+    '<div><div>'+esc(it.label)+' '+lock+'</div>'+
+    '<div class="path">'+esc(it.path)+'</div></div>'+
     '<span class="size">'+fmt(it.size)+'</span>';
-   row.querySelector('input').dataset.path=it.path;
-   row.querySelector('input').onchange=()=>{syncCat(catBox,items);update();};
+   const cb=row.querySelector('input');cb.dataset.path=it.path;
+   if(it.locked)cb.dataset.locked='1';
+   cb.onchange=()=>{syncCat(catBox,items);update();};
    items.appendChild(row);});
   syncCat(catBox,items);
   cat.appendChild(head);cat.appendChild(items);app.appendChild(cat);});
  update();}
 function selected(){return [...document.querySelectorAll('input[data-path]')]
- .filter(b=>b.checked);}
+ .filter(b=>b.checked&&!b.disabled);}
+function lockedItems(){const a=[];
+ DATA.categories.forEach(c=>c.items.forEach(it=>{if(it.locked)a.push(it);}));
+ return a;}
+function openPerms(){const L=lockedItems();
+ document.getElementById('perm-locked-n').textContent=
+  L.length?'('+L.length+'개)':'(없음)';
+ document.getElementById('perm-sudo-cmd').textContent=
+  L.length?('sudo rm -rf "'+L[0].path+'"'):'sudo rm -rf <경로>';
+ document.getElementById('perm-overlay').classList.add('show');}
+function closePerms(){
+ document.getElementById('perm-overlay').classList.remove('show');}
+function openFullDisk(){fetch('/open-fulldisk',{method:'POST'}).catch(()=>{});}
 function update(){const s=selected().reduce((a,b)=>a+(+b.dataset.size),0);
  document.getElementById('selected').textContent='선택됨: '+fmt(s);}
 function setProg(i,total,freed,cur){
@@ -488,6 +562,11 @@ class CleanerHandler(BaseHTTPRequestHandler):
             self._send(404, "not found")
 
     def do_POST(self):
+        if self.path == "/open-fulldisk":
+            open_fulldisk_settings()
+            self._send(200, json.dumps({"ok": True}),
+                       "application/json; charset=utf-8")
+            return
         if self.path != "/delete":
             self._send(404, "not found")
             return
