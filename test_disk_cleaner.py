@@ -1,3 +1,4 @@
+import errno
 import http.client
 import json
 import os
@@ -93,6 +94,77 @@ class MoveToTrashTest(unittest.TestCase):
         with self.assertRaises(disk_cleaner.ProtectedPathError):
             disk_cleaner.move_to_trash("/System")
 
+    def test_permission_error_not_copied(self):
+        # EPERM from rename must NOT fall back to shutil.move (which would
+        # duplicate gigabytes and still fail). It should propagate.
+        root = tempfile.mkdtemp()
+        trash = tempfile.mkdtemp()
+        src = os.path.join(root, "locked")
+        os.makedirs(src)
+        with open(os.path.join(src, "f.bin"), "wb") as f:
+            f.write(b"x" * 10)
+
+        orig_rename, orig_move = os.rename, disk_cleaner.shutil.move
+        moved = []
+        os.rename = lambda *a, **k: (_ for _ in ()).throw(
+            OSError(errno.EPERM, "Operation not permitted"))
+        disk_cleaner.shutil.move = lambda *a, **k: moved.append(a)
+        try:
+            with self.assertRaises(OSError):
+                disk_cleaner.move_to_trash(src, trash_dir=trash)
+        finally:
+            os.rename, disk_cleaner.shutil.move = orig_rename, orig_move
+        self.assertEqual(moved, [])  # never copied
+
+    def test_cross_volume_falls_back_to_move(self):
+        # EXDEV (different volume) is the one case where copy+remove is valid.
+        root = tempfile.mkdtemp()
+        trash = tempfile.mkdtemp()
+        src = os.path.join(root, "x.bin")
+        with open(src, "wb") as f:
+            f.write(b"x" * 10)
+
+        orig_rename, orig_move = os.rename, disk_cleaner.shutil.move
+        moved = []
+        os.rename = lambda *a, **k: (_ for _ in ()).throw(
+            OSError(errno.EXDEV, "Cross-device link"))
+        disk_cleaner.shutil.move = lambda s, d: moved.append((s, d))
+        try:
+            disk_cleaner.move_to_trash(src, trash_dir=trash)
+        finally:
+            os.rename, disk_cleaner.shutil.move = orig_rename, orig_move
+        self.assertEqual(len(moved), 1)  # copied across volume
+
+
+class ScanChildrenTest(unittest.TestCase):
+    def test_lists_each_child_as_item(self):
+        parent = tempfile.mkdtemp()
+        a = os.path.join(parent, "appA")
+        os.makedirs(a)
+        with open(os.path.join(a, "c.bin"), "wb") as f:
+            f.write(b"x" * 300)
+        b = os.path.join(parent, "appB")
+        os.makedirs(b)
+        with open(os.path.join(b, "c.bin"), "wb") as f:
+            f.write(b"y" * 100)
+        os.makedirs(os.path.join(parent, "empty"))  # 0 bytes -> skipped
+
+        items = disk_cleaner.scan_children(
+            [parent], "system_cache", True)
+
+        labels = sorted(i["label"] for i in items)
+        self.assertEqual(labels, ["appA", "appB"])
+        sizes = {i["label"]: i["size"] for i in items}
+        self.assertEqual(sizes["appA"], 300)
+        self.assertEqual(sizes["appB"], 100)
+        self.assertTrue(all(i["category"] == "system_cache" for i in items))
+        self.assertTrue(all(i["default_checked"] for i in items))
+
+    def test_missing_parent_skipped(self):
+        self.assertEqual(
+            disk_cleaner.scan_children(["/no/such/dir"], "system_cache", True),
+            [])
+
 
 class ScanPathsTest(unittest.TestCase):
     def test_builds_items_for_existing_paths_only(self):
@@ -176,6 +248,7 @@ class InventoryTest(unittest.TestCase):
                      "label": "x", "default_checked": True}
         inv = disk_cleaner.build_inventory(
             scan_paths=lambda paths, category, default_checked: [stub_item],
+            scan_children=lambda parents, category, default_checked: [stub_item],
             scan_large_files=lambda root: [],
             scan_duplicates=lambda roots: [],
             brew_cache=lambda: [],

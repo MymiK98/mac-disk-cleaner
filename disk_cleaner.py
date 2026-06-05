@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import os
@@ -89,9 +90,14 @@ def move_to_trash(path, trash_dir=None):
             n += 1
     try:
         os.rename(path, dest)
-    except OSError:
-        # cross-volume or other rename failure -> fall back to copy+remove
-        shutil.move(path, dest)
+    except OSError as exc:
+        if exc.errno == errno.EXDEV:
+            # genuinely on another volume -> copy+remove is the only option
+            shutil.move(path, dest)
+        else:
+            # EPERM/EACCES (e.g. TCC-protected cache): do NOT copy -- that would
+            # duplicate gigabytes and still fail. Report as a clean failure.
+            raise
     return dest
 
 
@@ -111,6 +117,35 @@ def scan_paths(paths, category, default_checked):
             "label": os.path.basename(p.rstrip(os.sep)) or p,
             "default_checked": default_checked,
         })
+    return items
+
+
+def scan_children(parents, category, default_checked):
+    """List each immediate child of every parent dir as its own item.
+
+    Used for ~/Library/Caches etc. so one TCC-protected subfolder cannot block
+    deletion of all the others, and each app's cache is selectable on its own.
+    """
+    items = []
+    for parent in parents:
+        if not os.path.isdir(parent):
+            continue
+        try:
+            names = sorted(os.listdir(parent))
+        except OSError:
+            continue
+        for name in names:
+            p = os.path.join(parent, name)
+            size = dir_size(p)
+            if size == 0:
+                continue
+            items.append({
+                "path": p,
+                "size": size,
+                "category": category,
+                "label": name,
+                "default_checked": default_checked,
+            })
     return items
 
 
@@ -202,6 +237,7 @@ def _brew_cache():
 
 def build_inventory(
     scan_paths=scan_paths,
+    scan_children=scan_children,
     scan_large_files=scan_large_files,
     scan_duplicates=scan_duplicates,
     brew_cache=_brew_cache,
@@ -212,10 +248,12 @@ def build_inventory(
         if progress is not None:
             progress(msg)
 
-    system_paths = [
+    # System caches/logs: expand into per-subfolder items so one protected
+    # entry (Safari/HomeKit/...) doesn't fail the whole parent. ~/.Trash is
+    # excluded -- moving the trash into the trash makes no sense.
+    cache_parents = [
         os.path.join(HOME, "Library", "Caches"),
         os.path.join(HOME, "Library", "Logs"),
-        os.path.join(HOME, ".Trash"),
     ]
     dev_paths = [
         os.path.join(HOME, ".npm"),
@@ -225,7 +263,7 @@ def build_inventory(
     ] + brew_cache()
 
     note("[1/4] 시스템 캐시/로그 스캔...")
-    system_items = scan_paths(system_paths, "system_cache", True)
+    system_items = scan_children(cache_parents, "system_cache", True)
     note("[2/4] 개발 캐시 스캔...")
     dev_items = scan_paths(dev_paths, "dev_cache", True)
     note("[3/4] 대용량 파일 스캔 (홈 디렉토리, 수십초 소요)...")
@@ -417,6 +455,10 @@ async function confirmDelete(){const sel=selected();
  document.getElementById('prog-title').textContent=
   '완료 — '+fmt(freed)+' 확보, 실패 '+fails+'건';
  document.getElementById('prog-cur').textContent='';
+ if(fails>0){const h=document.createElement('div');h.style.color='#86868b';
+  h.textContent='💡 권한 거부 항목은 시스템 설정 → 개인정보 보호 및 보안 → '+
+   '전체 디스크 접근 권한에 터미널(또는 Python)을 추가하면 삭제됩니다.';
+  const fl=document.getElementById('prog-fails');fl.insertBefore(h,fl.firstChild);}
  document.getElementById('prog-close').style.display='inline-block';}
 render();
 </script></body></html>"""
