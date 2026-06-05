@@ -1,3 +1,4 @@
+import hashlib
 import os
 import subprocess
 
@@ -118,4 +119,55 @@ def scan_large_files(root, threshold=500 * 1024 * 1024):
                     "default_checked": False,
                 })
     items.sort(key=lambda i: i["size"], reverse=True)
+    return items
+
+
+def _sha256(path, chunk=1 << 20):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            block = f.read(chunk)
+            if not block:
+                break
+            h.update(block)
+    return h.hexdigest()
+
+
+def scan_duplicates(roots):
+    """Flag duplicate file copies (keep first seen as original)."""
+    by_size = {}
+    for root in roots:
+        if not os.path.exists(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                fp = os.path.join(dirpath, name)
+                try:
+                    if os.path.islink(fp):
+                        continue
+                    size = os.path.getsize(fp)
+                except OSError:
+                    continue
+                by_size.setdefault(size, []).append(fp)
+
+    items = []
+    for size, paths in by_size.items():
+        if len(paths) < 2:
+            continue
+        seen_hashes = {}
+        for fp in sorted(paths):
+            try:
+                digest = _sha256(fp)
+            except OSError:
+                continue
+            if digest in seen_hashes:
+                items.append({
+                    "path": fp,
+                    "size": size,
+                    "category": "duplicates",
+                    "label": os.path.basename(fp),
+                    "default_checked": False,
+                })
+            else:
+                seen_hashes[digest] = fp
     return items

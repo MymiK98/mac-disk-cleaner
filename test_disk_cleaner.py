@@ -107,3 +107,22 @@ class LargeFilesTest(unittest.TestCase):
         self.assertNotIn(os.path.join(root, "small.bin"), paths)
         self.assertFalse(items[0]["default_checked"])
         self.assertEqual(items[0]["category"], "large_files")
+
+
+class DuplicatesTest(unittest.TestCase):
+    def test_flags_copies_not_original(self):
+        root = tempfile.mkdtemp()
+        content = b"identical-data" * 100
+        for name in ["orig.bin", "copy1.bin", "copy2.bin"]:
+            with open(os.path.join(root, name), "wb") as f:
+                f.write(content)
+        with open(os.path.join(root, "unique.bin"), "wb") as f:
+            f.write(b"different")
+
+        items = disk_cleaner.scan_duplicates([root])
+
+        paths = sorted(os.path.basename(i["path"]) for i in items)
+        self.assertEqual(len(items), 2)
+        self.assertNotIn("unique.bin", paths)
+        self.assertTrue(all(i["category"] == "duplicates" for i in items))
+        self.assertTrue(all(not i["default_checked"] for i in items))
