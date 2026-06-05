@@ -69,3 +69,24 @@ class MoveToTrashTest(unittest.TestCase):
     def test_protected_path_refused(self):
         with self.assertRaises(disk_cleaner.ProtectedPathError):
             disk_cleaner.move_to_trash("/System")
+
+
+class ScanPathsTest(unittest.TestCase):
+    def test_builds_items_for_existing_paths_only(self):
+        root = tempfile.mkdtemp()
+        big = os.path.join(root, "cache")
+        os.makedirs(big)
+        with open(os.path.join(big, "f.bin"), "wb") as f:
+            f.write(b"a" * 2048)
+        missing = os.path.join(root, "nope")
+
+        items = disk_cleaner.scan_paths(
+            [big, missing], category="dev_cache", default_checked=True)
+
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertEqual(item["path"], big)
+        self.assertEqual(item["size"], 2048)
+        self.assertEqual(item["category"], "dev_cache")
+        self.assertTrue(item["default_checked"])
+        self.assertEqual(item["label"], "cache")

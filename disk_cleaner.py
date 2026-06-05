@@ -76,3 +76,22 @@ def move_to_trash(path):
         raise ProtectedPathError(path)
     subprocess.run(move_command(path), check=True,
                    capture_output=True, text=True)
+
+
+def scan_paths(paths, category, default_checked):
+    """Turn a list of paths into inventory items, skipping missing ones."""
+    items = []
+    for p in paths:
+        if not os.path.exists(p):
+            continue
+        size = dir_size(p)
+        if size == 0:
+            continue
+        items.append({
+            "path": p,
+            "size": size,
+            "category": category,
+            "label": os.path.basename(p.rstrip(os.sep)) or p,
+            "default_checked": default_checked,
+        })
+    return items
