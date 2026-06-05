@@ -99,7 +99,7 @@ def scan_paths(paths, category, default_checked):
 
 
 def scan_large_files(root, threshold=500 * 1024 * 1024):
-    """Find individual files larger than threshold bytes under root."""
+    """Find individual files of at least threshold bytes under root."""
     items = []
     for dirpath, _dirnames, filenames in os.walk(root):
         for name in filenames:
@@ -123,6 +123,7 @@ def scan_large_files(root, threshold=500 * 1024 * 1024):
 
 
 def _sha256(path, chunk=1 << 20):
+    """Return hex SHA-256 digest of the file at path."""
     h = hashlib.sha256()
     with open(path, "rb") as f:
         while True:
@@ -152,7 +153,7 @@ def scan_duplicates(roots):
 
     items = []
     for size, paths in by_size.items():
-        if len(paths) < 2:
+        if size == 0 or len(paths) < 2:
             continue
         seen_hashes = {}
         for fp in sorted(paths):

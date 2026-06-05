@@ -108,6 +108,16 @@ class LargeFilesTest(unittest.TestCase):
         self.assertFalse(items[0]["default_checked"])
         self.assertEqual(items[0]["category"], "large_files")
 
+    def test_recurses_into_subdirectories(self):
+        root = tempfile.mkdtemp()
+        sub = os.path.join(root, "deep", "nested")
+        os.makedirs(sub)
+        buried = os.path.join(sub, "buried.bin")
+        with open(buried, "wb") as f:
+            f.write(b"a" * 3000)
+        items = disk_cleaner.scan_large_files(root, threshold=1000)
+        self.assertIn(buried, [i["path"] for i in items])
+
 
 class DuplicatesTest(unittest.TestCase):
     def test_flags_copies_not_original(self):
@@ -126,3 +136,12 @@ class DuplicatesTest(unittest.TestCase):
         self.assertNotIn("unique.bin", paths)
         self.assertTrue(all(i["category"] == "duplicates" for i in items))
         self.assertTrue(all(not i["default_checked"] for i in items))
+
+    def test_same_size_different_content_not_flagged(self):
+        root = tempfile.mkdtemp()
+        with open(os.path.join(root, "a.bin"), "wb") as f:
+            f.write(b"A" * 500)
+        with open(os.path.join(root, "b.bin"), "wb") as f:
+            f.write(b"B" * 500)
+        items = disk_cleaner.scan_duplicates([root])
+        self.assertEqual(items, [])
